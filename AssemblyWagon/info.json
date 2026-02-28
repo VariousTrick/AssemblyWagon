@@ -1,0 +1,13 @@
+{
+  "name": "AssemblyWagon",
+  "version": "0.0.1",
+  "title": "Assembly Wagon",
+  "author": "KrisZhang",
+  "factorio_version": "2.0",
+  "contact": "",
+  "homepage": "",
+  "description": "Adds a special cargo wagon that functions as a mobile assembly machine. (增加一种可作为移动组装机使用的特殊货运车厢。)",
+  "dependencies": [
+    "base >= 2.0.0"
+  ]
+}

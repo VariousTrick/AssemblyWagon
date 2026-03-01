@@ -74,4 +74,40 @@ function builder.on_entity_destroyed(event)
     end
 end
 
+-- 4. 兼容接口：当外部模组替换车厢实体时，转移绑定关系
+-- 参数必须是有效的 assembly-wagon 实体
+function builder.transfer_binding(old_wagon, new_wagon)
+    if not (old_wagon and old_wagon.valid and new_wagon and new_wagon.valid) then
+        return false
+    end
+
+    if old_wagon.name ~= "assembly-wagon" or new_wagon.name ~= "assembly-wagon" then
+        return false
+    end
+
+    local old_unit = old_wagon.unit_number
+    local new_unit = new_wagon.unit_number
+    if not (old_unit and new_unit) then
+        return false
+    end
+
+    local assembler = storage.wagon_to_assembler[old_unit]
+    local slot_id = storage.wagon_to_slot[old_unit]
+
+    -- 先清理旧键，避免并存
+    storage.wagon_to_assembler[old_unit] = nil
+    storage.wagon_to_slot[old_unit] = nil
+
+    if assembler and assembler.valid then
+        storage.wagon_to_assembler[new_unit] = assembler
+        storage.assembler_to_wagon[assembler.unit_number] = new_wagon
+    end
+
+    if slot_id then
+        storage.wagon_to_slot[new_unit] = slot_id
+    end
+
+    return true
+end
+
 return builder

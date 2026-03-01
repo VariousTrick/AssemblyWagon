@@ -4,6 +4,12 @@
 
 local builder = require("scripts.builder")
 local gui = require("scripts.gui")
+local aw_remote = require("scripts.remote")
+
+-- 注册对外 remote 接口（供其他模组调用）
+aw_remote.init({
+    Builder = builder,
+})
 
 -- 初始化
 script.on_init(function()

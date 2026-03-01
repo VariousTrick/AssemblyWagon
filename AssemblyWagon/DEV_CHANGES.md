@@ -3,6 +3,52 @@
 > 说明：模组未发布阶段使用本文件记录每一次改动。
 > 规则：新改动统一追加到最上方（时间倒序），每次包含日期、改动文件、改动内容。
 
+## 2026-03-01（remote注册风格与RiftRail统一）
+
+### 改动摘要
+- 将 AW 的 remote 模块从 `setup_interface` 防御式注册，调整为与 RiftRail 一致的 `init + 依赖注入 + add_interface` 风格。
+
+### 具体改动
+- `scripts/remote.lua`
+  - `Remote.setup_interface()` 改为 `Remote.init(params)`。
+  - `Builder` 改为通过 `params.Builder` 注入。
+  - 保留 `remote.add_interface("AssemblyWagon", ...)` 接口定义不变。
+
+- `control.lua`
+  - 启动注册改为：
+    - `aw_remote.init({ Builder = builder })`
+
+### 备注
+- 当前调用时机仍为脚本加载阶段，不在传送热路径上执行。
+
+## 2026-03-01（新增AW远程接口 transfer_binding）
+
+### 改动摘要
+- 新增 `scripts/remote.lua`，对外提供 `AssemblyWagon.transfer_binding` 远程接口。
+- 在 `builder` 中新增绑定迁移逻辑，用于旧车厢替换为新车厢时保持伴生组装机与槽位绑定。
+- `control.lua` 启动时注册 remote 接口。
+
+### 具体改动
+- `scripts/remote.lua`（新文件）
+  - 新增 `Remote.setup_interface()`：
+    - 若已有同名接口先移除再重注册。
+    - 注册 `remote.add_interface("AssemblyWagon", { transfer_binding = ... })`。
+  - `transfer_binding(old_wagon, new_wagon)` 内部委托 `builder.transfer_binding(...)`。
+
+- `scripts/builder.lua`
+  - 新增 `builder.transfer_binding(old_wagon, new_wagon)`：
+    - 校验两者均为有效 `assembly-wagon`。
+    - 转移 `storage.wagon_to_assembler` 键：`old_unit -> new_unit`。
+    - 转移 `storage.wagon_to_slot` 键：`old_unit -> new_unit`。
+    - 更新 `storage.assembler_to_wagon[assembler_unit] = new_wagon`。
+
+- `control.lua`
+  - 新增 `local aw_remote = require("scripts.remote")`。
+  - 新增 `aw_remote.setup_interface()`，启动时注册接口。
+
+### 备注
+- 该接口为跨模组兼容准备，当前目标是配合 RiftRail 传送替换流程。
+
 ## 2026-03-01（虚空地表创建即隐藏）
 
 ### 改动摘要

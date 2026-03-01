@@ -3,6 +3,99 @@
 > 说明：模组未发布阶段使用本文件记录每一次改动。
 > 规则：新改动统一追加到最上方（时间倒序），每次包含日期、改动文件、改动内容。
 
+## 2026-03-01（组装车厢库存扩展到500格）
+
+### 改动摘要
+- 按当前讨论先行扩大模组车厢容量，便于验证物流循环阶段的吞吐与阻塞行为。
+
+### 具体改动
+- `AssemblyWagon/prototypes/entities/assembly-wagon.lua`
+  - 新增 `entity.inventory_size = 500`。
+
+### 备注
+- 本次只调整车厢容量，不改成品回收逻辑。
+
+## 2026-03-01（修复输出搬运在品质场景下的类型报错）
+
+### 改动摘要
+- 修复 `on_nth_tick(10)` 中输出搬运逻辑对 `get_contents()` 返回结构假设过窄导致的运行时报错。
+
+### 具体改动
+- `AssemblyWagon/scripts/logistics.lua`
+  - 新增 `move_single_output_entry(...)`，统一处理单条输出搬运。
+  - `move_outputs_to_wagon(...)` 改为兼容两种结构：
+    - 普通计数：`item -> number`
+    - 品质分层计数：`item -> { quality -> number }`
+  - 避免 `math.min(table, 100)` 类型错误。
+
+### 备注
+- 报错栈：`bad argument #1 of 3 to 'min' (number expected, got table)`。
+
+## 2026-03-01（移除旧存档重建分支）
+
+### 改动摘要
+- 按“初版开发”策略，删除物流初始化中的旧存档兼容重建逻辑。
+
+### 具体改动
+- `AssemblyWagon/scripts/logistics.lua`
+  - 在 `Logistics.on_init()` 中移除：
+    - 当活跃列表为空时，从 `storage.wagon_to_assembler` 重建 `aw_active_wagons/aw_active_index` 的分支。
+  - 保留纯初始化路径：只创建空结构，不做历史数据推断。
+
+### 备注
+- 当前阶段不考虑已发布版本的存档兼容，不新增迁移逻辑。
+
+## 2026-03-01（物流循环实行分片轮询）
+
+### 改动摘要
+- 物流引擎从“全量扫描绑定表”升级为“活跃列表 + 游标 + 固定预算”的分片轮询。
+- 每次 `on_nth_tick` 仅处理部分绑定对，降低大规模存档下的帧时间抖动。
+
+### 具体改动
+- `AssemblyWagon/scripts/builder.lua`
+  - 新增活跃列表维护：`storage.aw_active_wagons`、`storage.aw_active_index`。
+  - 新增局部函数：`add_active_wagon(unit_number)`、`remove_active_wagon(unit_number)`（swap-remove）。
+  - 在建造/拆除/兼容迁移路径中同步维护活跃列表。
+
+- `AssemblyWagon/scripts/logistics.lua`
+  - 新增分片参数：`MAX_PAIRS_PER_STEP = 80`。
+  - 新增游标：`storage.aw_logistics.cursor`。
+  - `on_nth_tick` 改为：
+    - 从活跃列表按游标轮询。
+    - 每轮最多处理固定预算绑定对。
+    - 对失效绑定执行惰性清理并从活跃列表剔除。
+  - `on_init` 增加旧存档兼容：可从 `wagon_to_assembler` 重建活跃列表。
+
+### 备注
+- 当前分片参数为保守默认值，后续可按实测 UPS 再调优。
+
+## 2026-03-01（新增物流搬运引擎 MVP）
+
+### 改动摘要
+- 新增独立物流模块 `scripts/logistics.lua`，以 `on_nth_tick` 驱动车厢与组装机间的物品搬运。
+- 采用“两阶段搬运”策略：先拉成品，再按需喂料。
+- 加入配方缓存与睡眠机制，降低空转开销。
+
+### 具体改动
+- `AssemblyWagon/scripts/logistics.lua`（新文件）
+  - 新增 `Logistics.on_init()`：初始化 `storage.aw_logistics`（`recipe_cache`、`sleep_until`）。
+  - 新增 `Logistics.on_nth_tick(event)`：遍历绑定对，执行单对处理流程。
+  - 新增 `process_pair(...)`：
+    - 先执行输出搬运（组装机 -> 车厢）。
+    - 再执行输入投喂（车厢 -> 组装机）。
+    - 处理无配方、输出阻塞、空转睡眠等状态。
+  - 新增 `Logistics.get_nth_tick()`：返回循环间隔（当前 `10` tick）。
+  - 全文件补充中文注释和 `---@param` 类型提示。
+
+- `AssemblyWagon/control.lua`
+  - 新增 `local logistics = require("scripts.logistics")`。
+  - 在 `on_init/on_configuration_changed` 中调用 `logistics.on_init()`。
+  - 新增 `script.on_nth_tick(logistics.get_nth_tick(), logistics.on_nth_tick)`。
+
+### 备注
+- 当前为 MVP：仅处理固体物品配方，流体配方默认跳过。
+- 目标是先确保稳定与不吞物，后续再做分片预算与更细粒度性能优化。
+
 ## 2026-03-01（remote注册风格与RiftRail统一）
 
 ### 改动摘要

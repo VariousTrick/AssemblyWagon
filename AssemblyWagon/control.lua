@@ -5,6 +5,7 @@
 local builder = require("scripts.builder")
 local gui = require("scripts.gui")
 local aw_remote = require("scripts.remote")
+local logistics = require("scripts.logistics")
 
 -- 注册对外 remote 接口（供其他模组调用）
 aw_remote.init({
@@ -15,11 +16,13 @@ aw_remote.init({
 script.on_init(function()
     builder.on_init()
     gui.on_init()
+    logistics.on_init()
 end)
 
 script.on_configuration_changed(function()
     builder.on_init()
     gui.on_init()
+    logistics.on_init()
 end)
 
 -- 实体过滤器：只监听本模组相关实体
@@ -42,3 +45,6 @@ script.on_event(defines.events.script_raised_destroy, builder.on_entity_destroye
 script.on_event(defines.events.on_player_created, gui.on_player_created)
 script.on_event(defines.events.on_gui_opened, gui.on_gui_opened)
 script.on_event(defines.events.on_gui_click, gui.on_gui_click)
+
+-- 物流循环（按固定间隔执行）
+script.on_nth_tick(logistics.get_nth_tick(), logistics.on_nth_tick)

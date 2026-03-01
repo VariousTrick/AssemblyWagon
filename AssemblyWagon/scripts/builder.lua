@@ -1,12 +1,57 @@
 local builder = {}
 local VoidPool = require("scripts.void_pool")
 
+-- 将车厢加入活跃列表（供物流分片轮询）
+local function add_active_wagon(unit_number)
+    if not unit_number then
+        return
+    end
+
+    storage.aw_active_wagons = storage.aw_active_wagons or {}
+    storage.aw_active_index = storage.aw_active_index or {}
+
+    if storage.aw_active_index[unit_number] then
+        return
+    end
+
+    local list = storage.aw_active_wagons
+    list[#list + 1] = unit_number
+    storage.aw_active_index[unit_number] = #list
+end
+
+-- 将车厢从活跃列表移除（swap-remove）
+local function remove_active_wagon(unit_number)
+    if not (unit_number and storage.aw_active_wagons and storage.aw_active_index) then
+        return
+    end
+
+    local list = storage.aw_active_wagons
+    local index_map = storage.aw_active_index
+    local idx = index_map[unit_number]
+    if not idx then
+        return
+    end
+
+    local last_idx = #list
+    local last_unit = list[last_idx]
+
+    list[idx] = last_unit
+    list[last_idx] = nil
+    index_map[unit_number] = nil
+
+    if last_unit and last_unit ~= unit_number then
+        index_map[last_unit] = idx
+    end
+end
+
 -- 1. 初始化数据存储，准备一个字典用来记录【车厢】和【组装机】的一一对应关系
 function builder.on_init()
     storage.wagon_to_assembler = storage.wagon_to_assembler or {}
     -- 反向字典，方便通过组装机找车厢
     storage.assembler_to_wagon = storage.assembler_to_wagon or {}
     storage.wagon_to_slot = storage.wagon_to_slot or {}
+    storage.aw_active_wagons = storage.aw_active_wagons or {}
+    storage.aw_active_index = storage.aw_active_index or {}
     VoidPool.on_init()
 end
 
@@ -34,6 +79,8 @@ function builder.on_entity_created(event)
             storage.assembler_to_wagon[assembler.unit_number] = entity
             -- 记录槽位绑定，用于回收
             storage.wagon_to_slot[entity.unit_number] = slot_id
+            -- 加入物流活跃列表
+            add_active_wagon(entity.unit_number)
         else
             -- 创建失败时立即归还槽位
             VoidPool.release_slot(slot_id)
@@ -61,6 +108,7 @@ function builder.on_entity_destroyed(event)
         local slot_id = storage.wagon_to_slot[entity.unit_number]
         storage.wagon_to_slot[entity.unit_number] = nil
         VoidPool.release_slot(slot_id)
+        remove_active_wagon(entity.unit_number)
     elseif entity.name == "wagon-assembler" then
         local wagon = storage.assembler_to_wagon[entity.unit_number]
         if wagon and wagon.valid and wagon.unit_number then
@@ -68,6 +116,7 @@ function builder.on_entity_destroyed(event)
             local slot_id = storage.wagon_to_slot[wagon.unit_number]
             storage.wagon_to_slot[wagon.unit_number] = nil
             VoidPool.release_slot(slot_id)
+            remove_active_wagon(wagon.unit_number)
         end
 
         storage.assembler_to_wagon[entity.unit_number] = nil
@@ -97,6 +146,7 @@ function builder.transfer_binding(old_wagon, new_wagon)
     -- 先清理旧键，避免并存
     storage.wagon_to_assembler[old_unit] = nil
     storage.wagon_to_slot[old_unit] = nil
+    remove_active_wagon(old_unit)
 
     if assembler and assembler.valid then
         storage.wagon_to_assembler[new_unit] = assembler
@@ -106,6 +156,8 @@ function builder.transfer_binding(old_wagon, new_wagon)
     if slot_id then
         storage.wagon_to_slot[new_unit] = slot_id
     end
+
+    add_active_wagon(new_unit)
 
     return true
 end

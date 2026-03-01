@@ -3,6 +3,197 @@
 > 说明：模组未发布阶段使用本文件记录每一次改动。
 > 规则：新改动统一追加到最上方（时间倒序），每次包含日期、改动文件、改动内容。
 
+## 2026-03-01（清仓扩展到 trash/dump）
+
+### 改动摘要
+- 清仓模式从“输出+输入”扩展为“输出+输入+垃圾+弹出”四库存全扫，避免切配方后残留滞留在 `trash/dump`。
+
+### 具体改动
+- `AssemblyWagon/scripts/logistics.lua`
+  - 新增库存读取：`crafter_trash`、`assembling_machine_dump`。
+  - 新增通用搬运函数 `move_inventory_to_wagon(...)`，并用于输入/垃圾/弹出库存回退。
+  - 清仓分支新增 `trash/dump` 搬运与剩余检测；仅全部清空后退出清仓模式。
+  - 调试日志增加 `trash_ops/dump_ops` 与 `has_trash/has_dump` 字段。
+
+## 2026-03-01（切配方强制清仓 + GPS 满仓告警）
+
+### 改动摘要
+- 切配方后清仓逻辑改为“强制优先清仓”：先退回组装机内可访问的输出与输入物品，再恢复正常投喂。
+- 清仓失败（车厢满）时提示改为携带车厢 GPS 的本地化消息；成品回仓失败仍保持静默。
+
+### 具体改动
+- `AssemblyWagon/scripts/logistics.lua`
+  - 新增 `MAX_DRAIN_OPS_PER_PAIR = 8`，提高清仓阶段每轮搬运预算。
+  - 新增 `inventory_has_items(...)`、`get_wagon_gps(...)`、`print_drain_full_warning(...)` 辅助函数。
+  - 在 `process_pair(...)` 中将“配方变化检测 + 清仓模式”前置：
+    - 配方切换后立即进入清仓模式；
+    - 清仓模式下优先搬运输出库存，再搬运输入库存；
+    - 清仓未完成则短睡眠重试；清仓完成后退出清仓模式。
+  - 仅在清仓阶段回退失败时提示满仓，不对常规成品回仓阻塞进行 `game.print`。
+
+- `AssemblyWagon/locale/zh-CN/locale.cfg`
+  - 新增 `messages.aw-wagon-full-cannot-return-gps`（含 GPS 占位符 `__1__`）。
+
+- `AssemblyWagon/locale/en/locale.cfg`
+  - 新增 `messages.aw-wagon-full-cannot-return-gps`（含 GPS 占位符 `__1__`）。
+
+## 2026-03-01（清仓退料失败提示：仅车厢满时提示）
+
+### 改动摘要
+- 清仓阶段若旧料因车厢已满无法退回，新增本地化 `game.print` 提示。
+- 成品回仓失败保持静默，不提示。
+
+### 具体改动
+- `AssemblyWagon/scripts/logistics.lua`
+  - `move_inputs_to_wagon(...)` 增加 `blocked` 返回值。
+  - 清仓模式下当 `drain_blocked` 为真时触发提示：
+    - `game.print({ "messages.aw-wagon-full-cannot-return" })`
+  - 新增节流表 `storage.aw_logistics.drain_full_warn_until`，同一车厢每 300 tick 最多提示一次。
+  - 在绑定清理/清仓完成时清除对应节流状态。
+
+- `AssemblyWagon/locale/zh-CN/locale.cfg`
+  - 新增 `messages.aw-wagon-full-cannot-return` 中文文案。
+
+- `AssemblyWagon/locale/en/locale.cfg`
+  - 新增 `messages.aw-wagon-full-cannot-return` 英文文案。
+
+### 备注
+- 按当前需求，成品回仓阻塞不做任何提示。
+
+## 2026-03-01（切配方后旧料退回车厢）
+
+### 改动摘要
+- 新增“清仓模式”：当配方切换时，先将组装机输入槽旧原料退回车厢，再恢复新配方投喂。
+
+### 具体改动
+- `AssemblyWagon/scripts/logistics.lua`
+  - `storage.aw_logistics` 新增 `drain_mode`。
+  - 新增 `move_inputs_to_wagon(...)`：按输入槽位逐格回退旧料到车厢。
+  - 在 `process_pair(...)` 中：
+    - 检测到 `recipe` 变化后置 `drain_mode[wagon_unit] = true`。
+    - 清仓模式下优先退回输入槽旧料，未清空则短睡眠重试。
+    - 输入槽清空后退出清仓模式，再进入正常投喂。
+
+### 备注
+- 该逻辑直接解决“切配方后旧原料长期滞留在组装机槽位”的问题。
+
+## 2026-03-01（修复输出搬运中的 LuaItemStack 失效读取）
+
+### 改动摘要
+- 修复 `on_nth_tick(10)` 输出搬运时因 `remove` 后槽位失效导致的 `LuaItemStack invalid for read` 报错。
+
+### 具体改动
+- `AssemblyWagon/scripts/logistics.lua`
+  - 在按槽位搬运逻辑中，先缓存 `stack.name` 与 `stack.quality`。
+  - 后续 `remove/insert` 全部使用缓存变量，避免在槽位被清空后继续读取 `stack` 字段。
+
+### 备注
+- 报错栈：`LuaItemStack API call when LuaItemStack was invalid for read`（line 121）。
+
+## 2026-03-01（修复“输出有货但不回仓”）
+
+### 改动摘要
+- 将成品回仓逻辑从 `get_contents` 解析改为“按输出槽位逐格搬运”，修复输出栏满但不搬运的问题。
+
+### 具体改动
+- `AssemblyWagon/scripts/logistics.lua`
+  - 删除基于 `get_contents()` 的成品提取路径。
+  - `move_outputs_to_wagon(...)` 改为按 `output_inv[slot_index]` 逐格读取并搬运：
+    - 每格最多搬 `100`。
+    - 失败时回插到输出库存。
+    - `inserted == 0` 标记为阻塞。
+
+### 备注
+- 该改动用于规避品质/统计结构差异导致的 `remove` 拿不到物品问题。
+
+## 2026-03-01（日志判断简化 + 物流回仓诊断日志）
+
+### 改动摘要
+- 按讨论将日志判断简化为 `if AssemblyWagon.DEBUG_MODE_ENABLED then`，移除冗余 `if AssemblyWagon` 判断。
+- 在物流模块加入“成品回仓”关键诊断日志，便于直接定位“为什么没回车厢”。
+
+### 具体改动
+- `AssemblyWagon/scripts/builder.lua`
+  - 所有日志判断统一为 `if AssemblyWagon.DEBUG_MODE_ENABLED then`。
+
+- `AssemblyWagon/scripts/remote.lua`
+  - 所有日志判断统一为 `if AssemblyWagon.DEBUG_MODE_ENABLED then`。
+
+- `AssemblyWagon/scripts/logistics.lua`
+  - 新增 `Logistics.init(deps)` 接收 `log_debug` 注入。
+  - 在输出搬运后新增诊断日志：
+    - 成功回仓（`moved_out_ops > 0`）
+    - 回仓阻塞（`blocked == true`）
+    - 输出有货但未搬运（`next(output_contents) ~= nil` 且 `moved_out_ops == 0`）
+
+- `AssemblyWagon/control.lua`
+  - 新增 `logistics.init({ log_debug = log_debug })` 注入。
+
+## 2026-03-01（日志系统改为 RiftRail 同风格）
+
+### 改动摘要
+- 按你的要求，将日志体系从“惰性回调构造”改为 RiftRail 同款：
+  - `control.lua` 挂全局开关 `AssemblyWagon.DEBUG_MODE_ENABLED`
+  - 提供 `log_debug(msg)`
+  - 业务模块通过依赖注入拿到 `log_debug`
+  - 字符串拼接统一放在 `if DEBUG then` 语句块内
+
+### 具体改动
+- `AssemblyWagon/control.lua`
+  - 新增 `AssemblyWagon.DEBUG_MODE_ENABLED` 刷新逻辑。
+  - 新增 `log_debug(msg)`。
+  - `builder.init(...)` 与 `remote.init(...)` 注入 `log_debug`。
+  - 运行时设置变更时刷新全局调试开关。
+
+- `AssemblyWagon/scripts/builder.lua`
+  - 新增 `builder.init(deps)` 接收 `log_debug`。
+  - 所有日志改为 `if AssemblyWagon.DEBUG_MODE_ENABLED then ... end` 包裹。
+
+- `AssemblyWagon/scripts/remote.lua`
+  - `Remote.init(params)` 接收 `log_debug`。
+  - 日志改为显式 `if DEBUG then` 包裹。
+
+- `AssemblyWagon/scripts/logger.lua`
+  - 删除（不再使用惰性回调日志器）。
+
+### 备注
+- 当前实现与 RiftRail 日志风格一致，便于跨模组维护。
+
+## 2026-03-01（新增可开关调试日志系统）
+
+### 改动摘要
+- 新增类似 RiftRail 风格的可开关调试日志系统。
+- 日志统一走惰性消息构造，关闭开关时不进行字符串拼接。
+
+### 具体改动
+- `AssemblyWagon/settings.lua`（新文件）
+  - 新增运行时全局设置：`assemblywagon-debug-mode`（默认 `false`）。
+
+- `AssemblyWagon/scripts/logger.lua`（新文件）
+  - 新增 `Logger.init()`：读取调试开关状态。
+  - 新增 `Logger.debug(message_or_builder)`：
+    - 仅在开关开启时输出。
+    - 支持函数回调惰性构造消息，避免关闭时字符串拼接。
+
+- `AssemblyWagon/control.lua`
+  - 启动与配置变更时调用 `logger.init()`。
+  - 监听 `on_runtime_mod_setting_changed`，当 `assemblywagon-debug-mode` 改变时热更新日志开关。
+
+- `AssemblyWagon/scripts/builder.lua`
+  - 在初始化、创建绑定、销毁解绑、跨模组转移绑定等关键路径加入调试日志（均为惰性消息构造）。
+
+- `AssemblyWagon/scripts/remote.lua`
+  - 在 remote 接口注册和 `transfer_binding` 调用处加入调试日志（惰性消息构造）。
+
+- `AssemblyWagon/locale/zh-CN/locale.cfg`
+  - 新增调试设置中文名称与说明。
+
+- `AssemblyWagon/locale/en/locale.cfg`（新文件）
+  - 新增调试设置英文名称与说明。
+
+### 备注
+- 当前日志系统已具备“零开销消息拼接”特性，后续新增日志应统一通过 `Logger.debug(function() ... end)` 形式写入。
+
 ## 2026-03-01（组装车厢库存扩展到500格）
 
 ### 改动摘要

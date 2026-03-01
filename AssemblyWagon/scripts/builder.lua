@@ -1,5 +1,12 @@
 local builder = {}
 local VoidPool = require("scripts.void_pool")
+local log_debug = function(_) end
+
+function builder.init(deps)
+    if deps and deps.log_debug then
+        log_debug = deps.log_debug
+    end
+end
 
 -- 将车厢加入活跃列表（供物流分片轮询）
 local function add_active_wagon(unit_number)
@@ -53,6 +60,10 @@ function builder.on_init()
     storage.aw_active_wagons = storage.aw_active_wagons or {}
     storage.aw_active_index = storage.aw_active_index or {}
     VoidPool.on_init()
+
+    if AssemblyWagon.DEBUG_MODE_ENABLED then
+        log_debug("builder.on_init 完成，当前绑定数=" .. tostring(#storage.aw_active_wagons))
+    end
 end
 
 -- 2. 建造事件处理逻辑
@@ -81,9 +92,17 @@ function builder.on_entity_created(event)
             storage.wagon_to_slot[entity.unit_number] = slot_id
             -- 加入物流活跃列表
             add_active_wagon(entity.unit_number)
+
+            if AssemblyWagon.DEBUG_MODE_ENABLED then
+                log_debug("创建绑定: wagon=" .. tostring(entity.unit_number) .. ", assembler=" .. tostring(assembler.unit_number) .. ", slot=" .. tostring(slot_id))
+            end
         else
             -- 创建失败时立即归还槽位
             VoidPool.release_slot(slot_id)
+
+            if AssemblyWagon.DEBUG_MODE_ENABLED then
+                log_debug("创建伴生组装机失败，已归还槽位 slot=" .. tostring(slot_id))
+            end
         end
     end
 end
@@ -109,6 +128,10 @@ function builder.on_entity_destroyed(event)
         storage.wagon_to_slot[entity.unit_number] = nil
         VoidPool.release_slot(slot_id)
         remove_active_wagon(entity.unit_number)
+
+        if AssemblyWagon.DEBUG_MODE_ENABLED then
+            log_debug("移除绑定(车厢销毁): wagon=" .. tostring(entity.unit_number) .. ", slot=" .. tostring(slot_id))
+        end
     elseif entity.name == "wagon-assembler" then
         local wagon = storage.assembler_to_wagon[entity.unit_number]
         if wagon and wagon.valid and wagon.unit_number then
@@ -120,6 +143,10 @@ function builder.on_entity_destroyed(event)
         end
 
         storage.assembler_to_wagon[entity.unit_number] = nil
+
+        if AssemblyWagon.DEBUG_MODE_ENABLED then
+            log_debug("移除绑定(组装机销毁): assembler=" .. tostring(entity.unit_number))
+        end
     end
 end
 
@@ -158,6 +185,10 @@ function builder.transfer_binding(old_wagon, new_wagon)
     end
 
     add_active_wagon(new_unit)
+
+    if AssemblyWagon.DEBUG_MODE_ENABLED then
+        log_debug("转移绑定: old_wagon=" .. tostring(old_unit) .. " -> new_wagon=" .. tostring(new_unit))
+    end
 
     return true
 end

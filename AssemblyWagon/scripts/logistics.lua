@@ -1,4 +1,11 @@
 local Logistics = {}
+local log_debug = function(_) end
+
+function Logistics.init(deps)
+    if deps and deps.log_debug then
+        log_debug = deps.log_debug
+    end
+end
 
 -- 物流循环间隔（tick）
 local NTH_TICK = 10
@@ -6,12 +13,16 @@ local NTH_TICK = 10
 local MAX_PAIRS_PER_STEP = 80
 -- 每个绑定对单轮最多执行的搬运操作次数（防止单个车厢独占预算）
 local MAX_OPS_PER_PAIR = 4
+-- 清仓模式下每个绑定对单轮最多执行的搬运操作次数（提高切配方清仓收敛速度）
+local MAX_DRAIN_OPS_PER_PAIR = 8
 
 ---初始化物流状态存储
 function Logistics.on_init()
     storage.aw_logistics = storage.aw_logistics or {}
     storage.aw_logistics.recipe_cache = storage.aw_logistics.recipe_cache or {}
     storage.aw_logistics.sleep_until = storage.aw_logistics.sleep_until or {}
+    storage.aw_logistics.drain_mode = storage.aw_logistics.drain_mode or {}
+    storage.aw_logistics.drain_full_warn_until = storage.aw_logistics.drain_full_warn_until or {}
     storage.aw_logistics.cursor = storage.aw_logistics.cursor or 1
 
     -- 初版路径：直接初始化活跃列表结构，不做旧存档重建
@@ -62,7 +73,7 @@ local function get_assembler_input(assembler)
     if not (assembler and assembler.valid) then
         return nil
     end
-    return assembler.get_inventory(defines.inventory.assembling_machine_input)
+    return assembler.get_inventory(defines.inventory.crafter_input)
 end
 
 ---获取组装机输出库存
@@ -72,7 +83,27 @@ local function get_assembler_output(assembler)
     if not (assembler and assembler.valid) then
         return nil
     end
-    return assembler.get_inventory(defines.inventory.assembling_machine_output)
+    return assembler.get_inventory(defines.inventory.crafter_output)
+end
+
+---获取组装机垃圾库存
+-- @param assembler 组装机实体
+-- @return 组装机垃圾库存
+local function get_assembler_trash(assembler)
+    if not (assembler and assembler.valid) then
+        return nil
+    end
+    return assembler.get_inventory(defines.inventory.crafter_trash)
+end
+
+---获取组装机弹出库存（配方切换等场景）
+-- @param assembler 组装机实体
+-- @return 组装机弹出库存
+local function get_assembler_dump(assembler)
+    if not (assembler and assembler.valid) then
+        return nil
+    end
+    return assembler.get_inventory(defines.inventory.assembling_machine_dump)
 end
 
 ---获取当前配方（兼容不同 API 读取方式）
@@ -90,90 +121,149 @@ local function get_current_recipe(assembler)
     return assembler.recipe
 end
 
----将组装机输出尽量搬到车厢
--- @param output_inv 组装机输出库存
--- @param wagon_inv 车厢库存
--- @param max_ops 本轮最多搬运次数
--- @return moved_ops 实际执行的搬运次数
--- @return blocked 是否出现“有产物但无法塞入车厢”的阻塞
-local function move_single_output_entry(output_inv, wagon_inv, item_key, quality_key, raw_count)
-    local name = nil
-    local quality = nil
-
-    if type(item_key) == "string" then
-        name = item_key
-    elseif type(item_key) == "table" then
-        name = item_key.name
-        quality = item_key.quality
-    end
-
-    if type(quality_key) == "string" then
-        quality = quality_key
-    end
-
-    if not (name and type(raw_count) == "number" and raw_count > 0) then
-        return 0, false
-    end
-
-    local request = {
-        name = name,
-        count = math.min(raw_count, 100),
-    }
-    if quality then
-        request.quality = quality
-    end
-
-    local removed = output_inv.remove(request)
-    if removed <= 0 then
-        return 0, false
-    end
-
-    local inserted = wagon_inv.insert({
-        name = name,
-        count = removed,
-        quality = quality,
-    })
-
-    if inserted < removed then
-        output_inv.insert({
-            name = name,
-            count = (removed - inserted),
-            quality = quality,
-        })
-    end
-
-    return 1, inserted == 0
-end
-
 local function move_outputs_to_wagon(output_inv, wagon_inv, max_ops)
     local moved_ops = 0
     local blocked = false
 
-    local contents = output_inv.get_contents()
-    for item_key, item_count in pairs(contents) do
+    -- 改为按槽位读取，避免 get_contents 在品质场景下结构差异导致 remove 失败
+    for slot_index = 1, #output_inv do
         if moved_ops >= max_ops then
             break
         end
 
-        if type(item_count) == "number" then
-            local op_used, is_blocked = move_single_output_entry(output_inv, wagon_inv, item_key, nil, item_count)
-            moved_ops = moved_ops + op_used
-            blocked = blocked or is_blocked
-        elseif type(item_count) == "table" then
-            -- 兼容品质分层统计：value 可能是 { normal = n1, uncommon = n2, ... }
-            for quality_key, quality_count in pairs(item_count) do
-                if moved_ops >= max_ops then
-                    break
+        local stack = output_inv[slot_index]
+        if stack and stack.valid_for_read then
+            local stack_name = stack.name
+            local stack_quality = stack.quality
+            local move_count = math.min(stack.count, 100)
+
+            local removed = output_inv.remove({
+                name = stack_name,
+                count = move_count,
+                quality = stack_quality,
+            })
+
+            if removed > 0 then
+                local inserted = wagon_inv.insert({
+                    name = stack_name,
+                    count = removed,
+                    quality = stack_quality,
+                })
+
+                if inserted < removed then
+                    output_inv.insert({
+                        name = stack_name,
+                        count = (removed - inserted),
+                        quality = stack_quality,
+                    })
+                    if inserted == 0 then
+                        blocked = true
+                    end
                 end
 
-                local op_used, is_blocked = move_single_output_entry(output_inv, wagon_inv, item_key, quality_key, quality_count)
-                moved_ops = moved_ops + op_used
-                blocked = blocked or is_blocked
+                moved_ops = moved_ops + 1
             end
         end
     end
 
     return moved_ops, blocked
+end
+
+-- 将组装机输入槽中的物品退回车厢（用于切配方后的旧料清仓）
+-- @param input_inv 组装机输入库存
+-- @param wagon_inv 车厢库存
+-- @param max_ops 本轮最多搬运次数
+-- @return moved_ops 实际执行的搬运次数
+local function move_inventory_to_wagon(source_inv, wagon_inv, max_ops)
+    local moved_ops = 0
+    local blocked = false
+
+    if not source_inv then
+        return moved_ops, blocked
+    end
+
+    for slot_index = 1, #source_inv do
+        if moved_ops >= max_ops then
+            break
+        end
+
+        local stack = source_inv[slot_index]
+        if stack and stack.valid_for_read then
+            local stack_name = stack.name
+            local stack_quality = stack.quality
+            local move_count = math.min(stack.count, 100)
+
+            local removed = source_inv.remove({
+                name = stack_name,
+                count = move_count,
+                quality = stack_quality,
+            })
+
+            if removed > 0 then
+                local inserted = wagon_inv.insert({
+                    name = stack_name,
+                    count = removed,
+                    quality = stack_quality,
+                })
+
+                if inserted < removed then
+                    source_inv.insert({
+                        name = stack_name,
+                        count = (removed - inserted),
+                        quality = stack_quality,
+                    })
+                    if inserted == 0 then
+                        blocked = true
+                    end
+                end
+
+                moved_ops = moved_ops + 1
+            end
+        end
+    end
+
+    return moved_ops, blocked
+end
+
+local function move_inputs_to_wagon(input_inv, wagon_inv, max_ops)
+    return move_inventory_to_wagon(input_inv, wagon_inv, max_ops)
+end
+
+local function move_trash_to_wagon(trash_inv, wagon_inv, max_ops)
+    return move_inventory_to_wagon(trash_inv, wagon_inv, max_ops)
+end
+
+local function move_dump_to_wagon(dump_inv, wagon_inv, max_ops)
+    return move_inventory_to_wagon(dump_inv, wagon_inv, max_ops)
+end
+
+local function inventory_has_items(inv)
+    if not inv then
+        return false
+    end
+    return next(inv.get_contents()) ~= nil
+end
+
+local function get_wagon_gps(wagon)
+    if not (wagon and wagon.valid and wagon.position and wagon.surface and wagon.surface.name) then
+        return ""
+    end
+
+    local x = math.floor((wagon.position.x or 0) + 0.5)
+    local y = math.floor((wagon.position.y or 0) + 0.5)
+    return "[gps=" .. tostring(x) .. "," .. tostring(y) .. "," .. wagon.surface.name .. "]"
+end
+
+local function print_drain_full_warning(tick, wagon_unit, wagon)
+    local warn_until = storage.aw_logistics.drain_full_warn_until[wagon_unit] or 0
+    if tick < warn_until then
+        return
+    end
+
+    if game then
+        game.print({ "messages.aw-wagon-full-cannot-return-gps", get_wagon_gps(wagon) })
+    end
+    storage.aw_logistics.drain_full_warn_until[wagon_unit] = tick + 300
 end
 
 ---按配方需求从车厢投喂原料到组装机输入
@@ -222,6 +312,8 @@ local function process_pair(wagon_unit, wagon, assembler, tick)
         storage.wagon_to_assembler[wagon_unit] = nil
         storage.aw_logistics.recipe_cache[wagon_unit] = nil
         storage.aw_logistics.sleep_until[wagon_unit] = nil
+        storage.aw_logistics.drain_mode[wagon_unit] = nil
+        storage.aw_logistics.drain_full_warn_until[wagon_unit] = nil
         remove_active_wagon(wagon_unit)
         return
     end
@@ -235,27 +327,103 @@ local function process_pair(wagon_unit, wagon, assembler, tick)
     local wagon_inv = get_wagon_inventory(wagon)
     local input_inv = get_assembler_input(assembler)
     local output_inv = get_assembler_output(assembler)
+    local trash_inv = get_assembler_trash(assembler)
+    local dump_inv = get_assembler_dump(assembler)
     if not (wagon_inv and input_inv and output_inv) then
+        return
+    end
+
+    local recipe = get_current_recipe(assembler)
+    local recipe_name = recipe and recipe.name or nil
+    local cached_recipe = storage.aw_logistics.recipe_cache[wagon_unit]
+    local recipe_changed = (cached_recipe ~= recipe_name)
+
+    if recipe_changed then
+        storage.aw_logistics.recipe_cache[wagon_unit] = recipe_name
+        storage.aw_logistics.drain_mode[wagon_unit] = true
+        storage.aw_logistics.sleep_until[wagon_unit] = nil
+
+        if AssemblyWagon.DEBUG_MODE_ENABLED then
+            log_debug("物流: 检测到配方切换，进入清仓模式 wagon=" .. tostring(wagon_unit) .. ", old=" .. tostring(cached_recipe) .. ", new=" .. tostring(recipe_name))
+        end
+    end
+
+    -- 清仓模式：切配方后优先把组装机内所有可访问物品（输出+输入+垃圾+弹出）退回车厢
+    if storage.aw_logistics.drain_mode[wagon_unit] then
+        local moved_ops = 0
+        local moved_out_ops, out_blocked = move_outputs_to_wagon(output_inv, wagon_inv, MAX_DRAIN_OPS_PER_PAIR)
+        moved_ops = moved_ops + moved_out_ops
+
+        local remain_ops = MAX_DRAIN_OPS_PER_PAIR - moved_ops
+        local moved_in_ops = 0
+        local in_blocked = false
+        if remain_ops > 0 then
+            moved_in_ops, in_blocked = move_inputs_to_wagon(input_inv, wagon_inv, remain_ops)
+            moved_ops = moved_ops + moved_in_ops
+        end
+
+        remain_ops = MAX_DRAIN_OPS_PER_PAIR - moved_ops
+        local moved_trash_ops = 0
+        local trash_blocked = false
+        if remain_ops > 0 then
+            moved_trash_ops, trash_blocked = move_trash_to_wagon(trash_inv, wagon_inv, remain_ops)
+            moved_ops = moved_ops + moved_trash_ops
+        end
+
+        remain_ops = MAX_DRAIN_OPS_PER_PAIR - moved_ops
+        local moved_dump_ops = 0
+        local dump_blocked = false
+        if remain_ops > 0 then
+            moved_dump_ops, dump_blocked = move_dump_to_wagon(dump_inv, wagon_inv, remain_ops)
+            moved_ops = moved_ops + moved_dump_ops
+        end
+
+        local has_output = inventory_has_items(output_inv)
+        local has_input = inventory_has_items(input_inv)
+        local has_trash = inventory_has_items(trash_inv)
+        local has_dump = inventory_has_items(dump_inv)
+
+        if out_blocked or in_blocked or trash_blocked or dump_blocked then
+            print_drain_full_warning(tick, wagon_unit, wagon)
+        end
+
+        if AssemblyWagon.DEBUG_MODE_ENABLED then
+            if moved_ops > 0 then
+                log_debug("物流: 清仓退料 wagon=" .. tostring(wagon_unit) .. ", out_ops=" .. tostring(moved_out_ops) .. ", in_ops=" .. tostring(moved_in_ops) .. ", trash_ops=" .. tostring(moved_trash_ops) .. ", dump_ops=" .. tostring(moved_dump_ops))
+            end
+            if has_output or has_input or has_trash or has_dump then
+                log_debug("物流: 清仓未完成 wagon=" .. tostring(wagon_unit) .. ", has_output=" .. tostring(has_output) .. ", has_input=" .. tostring(has_input) .. ", has_trash=" .. tostring(has_trash) .. ", has_dump=" .. tostring(has_dump))
+            end
+        end
+
+        if has_output or has_input or has_trash or has_dump then
+            storage.aw_logistics.sleep_until[wagon_unit] = tick + 20
+            return
+        end
+
+        storage.aw_logistics.drain_mode[wagon_unit] = nil
+        storage.aw_logistics.drain_full_warn_until[wagon_unit] = nil
+        if AssemblyWagon.DEBUG_MODE_ENABLED then
+            log_debug("物流: 清仓完成 wagon=" .. tostring(wagon_unit))
+        end
+    end
+
+    -- 无配方：长睡眠，降低空转（清仓流程已在前面执行）
+    if not recipe then
+        storage.aw_logistics.sleep_until[wagon_unit] = tick + 300
         return
     end
 
     -- 第 1 阶段：先清输出，避免产物堆积
     local moved_out_ops, blocked = move_outputs_to_wagon(output_inv, wagon_inv, MAX_OPS_PER_PAIR)
 
-    local recipe = get_current_recipe(assembler)
-    local recipe_name = recipe and recipe.name or nil
-    local cached_recipe = storage.aw_logistics.recipe_cache[wagon_unit]
-
-    if cached_recipe ~= recipe_name then
-        -- 配方变化时重置睡眠并刷新缓存
-        storage.aw_logistics.recipe_cache[wagon_unit] = recipe_name
-        storage.aw_logistics.sleep_until[wagon_unit] = nil
-    end
-
-    -- 无配方：长睡眠，降低空转
-    if not recipe then
-        storage.aw_logistics.sleep_until[wagon_unit] = tick + 300
-        return
+    if AssemblyWagon.DEBUG_MODE_ENABLED then
+        local output_contents = output_inv.get_contents()
+        if moved_out_ops > 0 then
+            log_debug("物流: 成品已回仓 wagon=" .. tostring(wagon_unit) .. ", ops=" .. tostring(moved_out_ops))
+        elseif next(output_contents) ~= nil then
+            log_debug("物流: 检测到输出库存有物品但本轮未搬运 wagon=" .. tostring(wagon_unit))
+        end
     end
 
     -- 输出阻塞：短睡眠，等待车厢腾挪
@@ -322,6 +490,8 @@ function Logistics.on_nth_tick(event)
                 storage.wagon_to_assembler[wagon_unit] = nil
                 storage.aw_logistics.recipe_cache[wagon_unit] = nil
                 storage.aw_logistics.sleep_until[wagon_unit] = nil
+                storage.aw_logistics.drain_mode[wagon_unit] = nil
+                storage.aw_logistics.drain_full_warn_until[wagon_unit] = nil
                 remove_active_wagon(wagon_unit)
             else
                 cursor = cursor + 1

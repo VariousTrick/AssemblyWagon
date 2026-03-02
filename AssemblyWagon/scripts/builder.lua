@@ -80,6 +80,7 @@ function builder.on_entity_created(event)
             name = "wagon-assembler",
             position = position,
             force = entity.force,
+            quality = entity.quality,
             create_build_effect_smoke = false -- 不产生建造烟雾
         })
 
